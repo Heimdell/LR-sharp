@@ -1,10 +1,27 @@
 ﻿open System
 open System
 open System
+open System
+open System
+open System
 
 
 #nowarn "62"
 #nowarn "40"
+
+module List =
+  let rec drop n list =
+    match n, list with
+    | 0, list    -> list
+    | _, []      -> list
+    | n, _ :: xs -> drop (n - 1) xs
+
+  let rec splitAt n list =
+    match n, list with
+    | 0, list -> ([], list)
+    | n, x :: xs ->
+      let (l, r) = splitAt (n - 1) xs
+      (x :: l, r)
 
 module Option =
   exception EmptyOption
@@ -576,7 +593,7 @@ module rec Goto =
 module rec Action =
   type act =
     | Shift of State.index
-    | Reduce of int * string
+    | Reduce of int * string * NonTerm.t
     | Accept
     | Conflict of act list
   
@@ -629,7 +646,7 @@ module rec Action =
                 item.lookahead
                   |> Set.toList
                   |> List.map (fun term ->                            // add `Reduce` action
-                      Map.ofList [ix, Map.ofList [term, Reduce (Item.length item, item.mark)]]
+                      Map.ofList [ix, Map.ofList [term, Reduce (Item.length item, item.mark, item.entity)]]
                     )
                   |> List.fold merge Map.empty
           )
@@ -641,10 +658,10 @@ module rec Action =
 
   let rec showAct : act -> string =
     function
-    | Shift   state       -> "Shift "  + state.ToString()
-    | Reduce (size, mark) -> "Reduce " + mark + "/" + size.ToString()
-    | Accept              -> "Accept"
-    | Conflict acts       -> "Conflict [" + String.concat ", " (List.map showAct acts) + "]"
+    | Shift   state          -> "Shift "  + state.ToString()
+    | Reduce (size, mark, e) -> "Reduce " + mark + "/" + size.ToString() + " -> " + NonTerm.show e
+    | Accept                 -> "Accept"
+    | Conflict acts          -> "Conflict [" + String.concat ", " (List.map showAct acts) + "]"
 
   let show (goto : Action.t) : string =
     goto
@@ -653,6 +670,36 @@ module rec Action =
           src.ToString() + ":\n" + String.concat "\n" ((List.map (fun (pt, dest) -> "  " + Term.show pt + " -> " + showAct dest) <| Map.toList ptDestMap))
       )
       |> String.concat "\n"
+
+module Parser =
+
+  exception Expected of Term.t seq * Term.t
+
+  type 'a tree =
+    | Leaf of 'a
+    | Node of string * 'a tree list
+
+  let run
+    (action : Action.t)
+    (goto   : Goto.t)
+    (state  : State.index)
+    (input  : (Term.t * 'a) list)
+            : State.index list * 'a tree list
+    =
+      let rec consume (top :: states, values) (token, str) =
+        printfn "%A <- %A" (top :: states, values) (token, str)
+        printfn "%s" <| Action.show (Map.ofList [top, action.Item(top)])
+        printfn ""
+        match action.Item(top).TryFind(token) with
+        | Some (Action.Shift toState)         -> (toState :: top :: states, Leaf str :: values)
+        | Some  Action.Accept                 -> (top :: states, [Node ("s", values)])
+        | Some (Action.Reduce (len, mark, e)) ->
+          let top :: states = List.drop len (top :: states)
+          let (taken, rest) = List.splitAt len values
+          consume (goto.Item(top).Item(e) :: top :: states, Node (mark, taken) :: rest) (token, str)
+        | None ->
+          raise <| Expected (Map.keys <| action.Item(top), token)
+      List.fold consume ([state], []) input
 
 let t = Point.T << Term.Term << Lexeme.Concrete
 let d = Point.T << Term.Term << Lexeme.Category
@@ -712,6 +759,21 @@ printfn "%s" (State.showReg reg)
 printfn "GOTO"
 printfn "%s\n" (Goto.show goto)
 
-Action.from arith first reg 0
+let action = Action.from arith first reg 0
+
+action
   |> Action.show
   |> printfn "%s"
+
+exception Die
+
+try
+  Parser.run action goto 0
+    [ Term.Term (Lexeme.Concrete "("), "("
+      Term.Term (Lexeme.Category "num"), "1"
+      Term.Term (Lexeme.Concrete ")"), ")"
+    ]
+    |> printfn "%A"
+with Parser.Expected (terms, got) ->
+  printfn "Expected %A, got %A" terms got
+  raise Die
