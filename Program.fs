@@ -1,4 +1,9 @@
-﻿#nowarn "62"
+﻿open System
+open System
+open System
+
+
+#nowarn "62"
 #nowarn "40"
 
 module Option =
@@ -197,6 +202,17 @@ module rec Map =
       )
       |> clean
 
+  let mergeWith
+    (f : 'a -> 'a -> 'a)
+    (left  : ('k, 'a) Map)
+    (right : ('k, 'a) Map)
+           : ('k, 'a) Map
+    =
+      Map.foldBack (fun k v -> Map.change k (Option.elim v (f v) >> Some)) left right
+
+  let union (left : ('k, 'a) Map) (right : ('k, 'a) Map) : ('k, 'a) Map =
+    Map.mergeWith (fun x y -> y) left right
+
   /// Monoidal map union.
   ///
   let merge part whole = Map.foldBack (fun k v -> Map.change k (Set.optional >> Set.union v >> Set.nonEmpty)) part whole
@@ -267,6 +283,8 @@ module rec Pos =
       after  : Point.t list
     }
 
+  let length (pos : Pos.t) = List.length pos.before + List.length pos.after + Option.elim 0 (fun _ -> 1) pos.locus
+
   /// Rules can't be nullary.
   ///
   exception RuleCannotBeNullary
@@ -332,6 +350,8 @@ module rec Item =
       Item.mark      = rule.mark
     }
 
+  let length (item : Item.t) = Pos.length item.pos
+
   /// Move to the next point of the originating rule.
   ///
   let next (item : Item.t) : Item.t option =
@@ -366,12 +386,14 @@ module rec State =
   ///
   type t = Item.t Set
 
+  type index = int
+
   /// Type to collect all states into.
   ///
   type reg =
-    { indices : (State.t, int) Map
-      states  : (int, State.t) Map
-      counter : int
+    { indices : (State.t, State.index) Map
+      states  : (State.index, State.t) Map
+      counter : State.index
     }
 
   let emptyReg : reg =
@@ -380,7 +402,7 @@ module rec State =
       counter = 0
     }
 
-  let add (state : State.t) (reg : State.reg) : int * State.reg * bool =
+  let add (state : State.t) (reg : State.reg) : State.index * State.reg * bool =
     match reg.indices |> Map.tryFind state with
     | Some existing -> existing, reg, true
     | None ->
@@ -454,8 +476,16 @@ module rec State =
       |> Set.toList
       |> String.concat "\n"
 
+  let showReg (reg : State.reg) : string =
+    reg.states
+      |> Map.toList
+      |> List.map (fun (ix, state) -> "-- " + ix.ToString() + " --\n" + State.show state + "\n")
+      |> String.concat "\n"
+
+open State
+
 module rec Goto =
-  type t = ((int * Point.t), int) Map
+  type t = (State.index, (NonTerm.t, State.index) Map) Map
 
   let from
     (grammar : Grammar.t)
@@ -469,7 +499,7 @@ module rec Goto =
       let rec loop
         ( goto   : Goto.t
         , reg    : State.reg
-        , states : int Set
+        , states : State.index Set
         )        : Goto.t * State.reg
         =
         
@@ -478,10 +508,10 @@ module rec Goto =
           let moves
             ( goto  : Goto.t
             , reg   : State.reg
-            , next  : int Set
+            , next  : State.index Set
             )
-            ( state : int)
-                    : Goto.t * State.reg * int Set
+            ( state : State.index)
+                    : Goto.t * State.reg * State.index Set
             =
               let itemset = reg.states.Item state
           
@@ -503,24 +533,28 @@ module rec Goto =
               let addState
                 ( goto   : Goto.t
                 , reg    : State.reg
-                , next   : int Set
+                , next   : State.index Set
                 )
-                ( source : int
+                ( source : State.index
                 , point  : Point.t
                 , dest   : State.t
-                )        : Goto.t * State.reg * int Set
+                )        : Goto.t * State.reg * State.index Set
                 =
-                let ix, reg, existed = State.add dest reg
-                let goto = Map.add (source, point) ix goto
-                let next = if existed then next else Set.add ix next
+                let ix, reg, existed = State.add dest reg             // register destination state
+                let goto = 
+                  match point with
+                  | Point.T t -> goto
+                  | Point.NT nt ->
+                      Map.mergeWith Map.union (Map.ofList [source, Map.ofList [nt, ix]]) goto            // add transition
+                let next = if existed then next else Set.add ix next  // if destination is new, add it to the pool
                 goto, reg, next
 
               endRules
-                |> Set.fold addState (goto, reg, next)
+                |> Set.fold addState (goto, reg, next)              // for each transition from state
 
           let (goto, reg, next) =
             states
-              |> Set.fold moves (goto, reg, Set.empty)
+              |> Set.fold moves (goto, reg, Set.empty)            // for each state in the pool
 
           if Set.isEmpty next
           then goto, reg
@@ -530,6 +564,95 @@ module rec Goto =
       let ix, reg, _ = State.emptyReg |> State.add state0
 
       loop (Map.empty, reg, Set.ofList [ix])
+
+  let show (goto : Goto.t) : string =
+    goto
+      |> Map.toList
+      |> List.map (fun (src, ptDestMap) ->
+          src.ToString() + ":\n" + String.concat "\n" ((List.map (fun (pt, dest) -> "  " + NonTerm.show pt + " -> " + dest.ToString()) <| Map.toList ptDestMap))
+      )
+      |> String.concat "\n"
+
+module rec Action =
+  type act =
+    | Shift of State.index
+    | Reduce of int * string
+    | Accept
+    | Conflict of act list
+  
+  type t = (State.index, (Term.t, act) Map) Map
+
+  let mergeAct (left : act) (right : act) : act =
+    match left, right with
+    | Conflict az, Conflict bz -> Conflict ( az    @  bz)
+    | Conflict az, right       -> Conflict ( az    @ [right])
+    | left,        Conflict bz -> Conflict ([left] @  bz)
+    | left,        right       -> Conflict ([left;    right])
+
+  let merge : Action.t -> Action.t -> Action.t =
+    mergeAct
+      |> Map.mergeWith
+      |> Map.mergeWith
+
+  let from
+    (grammar : Grammar.t)
+    (first   : First.t)
+    (reg     : State.reg)
+    (start   : State.index)
+             : Action.t
+    =
+      let closure = State.closureOf grammar first
+
+      let states =
+        Map.keys reg.states
+          |> Seq.toList
+     
+      // Add actions on given state.
+      //
+      let action (ix : State.index) : Action.t =
+        let state = reg.states.Item ix                          
+        state
+          |> Set.toList
+          |> List.map (fun item ->                              // for each item in state
+            match Item.locus item with                            // match locus
+            | Some (Point.NT nt)   -> Map.empty                     // non-term? ignore
+            | Some (Point.T  term) ->                               // term?
+              let next = Item.next item |> Option.unsafeUnwrap        // get next item after term
+              let state = closure next                                // make item into state
+              let index = reg.indices.Item state                      // find that state in state registry
+              Map.ofList [ix, Map.ofList [term, Shift index]]         // produce `Shift` action
+            | None ->                                               // end-of-rule?
+              if item.entity = NonTerm.S                              // start action?
+              then
+                Map.ofList [ix, Map.ofList [Term.Eof, Accept]]          // produce `Accept`
+              else
+                item.lookahead
+                  |> Set.toList
+                  |> List.map (fun term ->                            // add `Reduce` action
+                      Map.ofList [ix, Map.ofList [term, Reduce (Item.length item, item.mark)]]
+                    )
+                  |> List.fold merge Map.empty
+          )
+          |> List.fold merge Map.empty
+
+      states
+        |> List.map action
+        |> List.fold merge Map.empty
+
+  let rec showAct : act -> string =
+    function
+    | Shift   state       -> "Shift "  + state.ToString()
+    | Reduce (size, mark) -> "Reduce " + mark + "/" + size.ToString()
+    | Accept              -> "Accept"
+    | Conflict acts       -> "Conflict [" + String.concat ", " (List.map showAct acts) + "]"
+
+  let show (goto : Action.t) : string =
+    goto
+      |> Map.toList
+      |> List.map (fun (src, ptDestMap) ->
+          src.ToString() + ":\n" + String.concat "\n" ((List.map (fun (pt, dest) -> "  " + Term.show pt + " -> " + showAct dest) <| Map.toList ptDestMap))
+      )
+      |> String.concat "\n"
 
 let t = Point.T << Term.Term << Lexeme.Concrete
 let d = Point.T << Term.Term << Lexeme.Category
@@ -552,7 +675,7 @@ let arith
     |> Grammar.add  "T" "mult" [n "T"; t "*"; n "F"]
     |> Grammar.add  "T" "f"    [n "F"]
     
-    |> Grammar.add  "F" "num"  [d "num"]
+    |> Grammar.add  "F" "fnum" [d "num"]
     |> Grammar.add  "F" "grp"  [t "("; n "E"; t ")"]
 
 arith
@@ -581,4 +704,14 @@ let closure = State.closureOf arith first
   |> Option.unsafeUnwrap
   |> closure
   |> State.show
-  |> printfn "%s" 
+  |> printfn "%s\n"
+
+let goto, reg = Goto.from arith first
+printfn "STATES"
+printfn "%s" (State.showReg reg)
+printfn "GOTO"
+printfn "%s\n" (Goto.show goto)
+
+Action.from arith first reg 0
+  |> Action.show
+  |> printfn "%s"
