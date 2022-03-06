@@ -255,54 +255,6 @@ module rec First =
     >> List.map (fun (s, terms) -> sprintf "%s = %s" (NonTerm.show s) (Set.show1 Term.show terms))
     >> String.concat "\n"
 
-/// Table of terminals that can be seen right after a non-terminal.
-///
-module rec Follow =
-
-  /// A map from non-terminal to a set of terminals that follow it.
-  ///
-  type t = (NonTerm.t, Term.t Set) Map
-
-  let from
-    (grammar : Grammar.t)
-    (first   : First.t)
-             : Follow.t
-    = let loop
-        (follow : Follow.t)
-                : Follow.t
-        = grammar
-            |> Map.toList
-            |> List.map (fun (super, rules) ->
-              
-              // Analyse each point and an optional following one.
-              //
-              let follows (pt, next) =
-                match pt, next with
-                | Point.NT nt, Some (Point.T term) -> Map.ofList [nt, Set.ofList [term]]
-                | Point.NT nt, None                -> Map.ofList [nt, Map.lookup follow super]
-                | Point.NT nt, Some (Point.NT nt1) -> Map.ofList [nt, Map.lookup first nt1]
-                | _                                -> Map.empty
-
-              // zipped [a; b; c] = [a, Some b; b, Some c; c, None]
-              //
-              let zipped (rule : Rule.t) = List.zip rule.points (List.map Some (List.tail rule.points) @ [None])
-
-              rules
-                |> List.map zipped              // analyse each rule variant
-                |> List.map (List.map follows)  // collect all followings
-                |> List.concat                  // merge
-            )
-            |> List.concat
-            |> List.fold Map.merge Map.empty    // collect into one map
-            |> Map.clean
-      
-      Map.ofList [NonTerm.S, Set.ofList [Term.Eof]]  // assume S can be followed by Eof
-        |> Map.fixpoint loop
-
-  let show
-    : Follow.t -> string
-    = First.show
-
 /// Position inside an LR(1)-Item.
 ///
 module rec Pos =
@@ -615,14 +567,6 @@ let first
 first
   |> First.show
   |> printfn "FIRST\n%s\n"
-
-let follow
-  : Follow.t
-  = Follow.from arith first
-
-follow
-  |> Follow.show
-  |> printfn "FOLLOW\n%s\n"
 
 let rule = [n "E"; t "+"; n "T"]
 
