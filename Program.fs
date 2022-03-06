@@ -716,11 +716,11 @@ let arith
   = Map.empty
     |> Grammar.addS     "s"    [n "E"]
 
-    |> Grammar.add  "E" "plus" [n "E"; t "+"; n "T"]
-    |> Grammar.add  "E" "t"    [n "T"]
+    |> Grammar.add  "E" "plus" [n "E"; t "+"; n "F"]
+    |> Grammar.add  "E" "t"    [n "F"]
 
-    |> Grammar.add  "T" "mult" [n "T"; t "*"; n "F"]
-    |> Grammar.add  "T" "f"    [n "F"]
+    //|> Grammar.add  "T" "mult" [n "T"; t "*"; n "F"]
+    //|> Grammar.add  "T" "f"    [n "F"]
     
     |> Grammar.add  "F" "fnum" [d "num"]
     |> Grammar.add  "F" "grp"  [t "("; n "E"; t ")"]
@@ -769,9 +769,8 @@ exception Die
 
 try
   Parser.run action goto 0
-    [ Term.Term (Lexeme.Concrete "("), "("
-      Term.Term (Lexeme.Category "num"), "1"
-      Term.Term (Lexeme.Concrete ")"), ")"
+    [ Term.Term (Lexeme.Category "num"), "1"
+      Term.Eof, ""
     ]
     |> printfn "%A"
 with Parser.Expected (terms, got) ->
