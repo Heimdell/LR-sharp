@@ -9,6 +9,39 @@ open System
 #nowarn "62"
 #nowarn "40"
 
+type ('a, 's) state =
+  { run : 's -> 'a * 's
+  }
+
+type State () =
+  member self.Return(a) = { run = fun s -> a, s }
+  member self.ReturnFrom(ma) = ma
+  member self.Bind(ma, amb) =
+    { run =
+        fun s ->
+          let a, s = ma.run s
+          (amb a).run s
+    }
+  member self.Combine(ma, mb) = self.Bind(ma, fun _ -> mb)
+
+let st = State()
+
+let rec forStateList
+  (list : 'a list)
+  (f    : 'a -> ('b, 's) state)
+        : ('b list, 's) state
+  = match list with
+    | [] -> st { return [] }
+    | x :: xs -> st {
+       let! y = f x
+       let! ys = forStateList xs f
+       return y :: ys
+    }
+
+let get      = { run = fun s -> s, s }
+let modify f = { run = fun s -> (), f s }
+let put x    = modify <| fun _ -> x
+
 module List =
   let rec drop n list =
     match n, list with
@@ -419,16 +452,19 @@ module rec State =
       counter = 0
     }
 
-  let add (state : State.t) (reg : State.reg) : State.index * State.reg * bool =
-    match reg.indices |> Map.tryFind state with
-    | Some existing -> existing, reg, true
-    | None ->
-      reg.counter,  
-        { reg with
-            indices = Map.add state reg.counter reg.indices
-            states  = Map.add reg.counter state reg.states
-            counter = reg.counter + 1
-        }, false
+  let add (state : State.t) : (State.index * bool, State.reg) state =
+    st {
+      let! reg = get
+      match reg.indices |> Map.tryFind state with
+      | Some existing -> return existing, true 
+      | None ->
+        do! put {
+              indices = Map.add state reg.counter reg.indices
+              states  = Map.add reg.counter state reg.states
+              counter = reg.counter + 1
+            }
+        return reg.counter, false
+    }
 
   /// Group items from state that differ only in lookaheads,
   /// and join the groups into single items with combined lookaheads.
@@ -453,7 +489,7 @@ module rec State =
     (grammar   : Grammar.t)
     (first     : First.t)
     (item      : Item.t)
-               : State.t
+               : (State.index * bool, State.reg) state
     =
       let loop (state : State.t) : State.t =
         state
@@ -476,16 +512,23 @@ module rec State =
                   |> Set.ofList
           )
 
-      Set.ofList [item]
-        |> Set.fixpoint loop
-        |> normalize
+      let state =
+        Set.ofList [item]
+          |> Set.fixpoint loop
+          |> normalize
 
-  let firstState (grammar : Grammar.t) (first : First.t) : State.t =
-    Map.find NonTerm.S grammar
-      |> List.map (Item.start <| Set.ofList [Term.Eof])
-      |> Set.ofList
-      |> Set.bind (closureOf grammar first)
+      add state
 
+  let firstState (grammar : Grammar.t) (first : First.t) : (State.index, State.reg) state =
+    st {
+      let item =
+        Map.find NonTerm.S grammar
+          |> List.exactlyOne
+          |> Item.start (Set.ofList [Term.Eof])
+
+      let! ix, _ = closureOf grammar first item
+      return ix
+    } 
 
   let show (state : State.t) : string =
     state
@@ -507,7 +550,7 @@ module rec Goto =
   let from
     (grammar : Grammar.t)
     (first   : First.t)
-             : Goto.t * State.reg
+             : (Goto.t, State.reg) state
     =
       let closure = State.closureOf grammar first
       
@@ -554,7 +597,7 @@ module rec Goto =
                 )
                 ( source : State.index
                 , point  : Point.t
-                , dest   : State.t
+                , dest   : State.index
                 )        : Goto.t * State.reg * State.index Set
                 =
                 let ix, reg, existed = State.add dest reg             // register destination state
